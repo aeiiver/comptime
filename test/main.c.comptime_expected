@@ -1,0 +1,31 @@
+#include <assert.h>
+#include <stdio.h>
+
+#include "comptime.h"
+
+int main(void)
+{
+    puts("c: test: simple");
+    {
+        assert(42 == 42);
+        assert(69 == 69);
+        assert('e' == 101);
+        assert('y' == 121);
+        assert('o' == 111);
+        assert('a' == 97);
+    }
+
+    puts("c: test: compound");
+    {
+        assert(69 == 69);
+    }
+
+    puts("c: test: io");
+    {
+        ;
+        ;
+        ;
+    }
+
+    return 0;
+}
