@@ -4,83 +4,87 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PANIC(fmt, ...) (fprintf(stderr, fmt "\n" __VA_OPT__(,) __VA_ARGS__), fflush(stderr), __builtin_trap())
+#define PANIC(s)         (fprintf(stderr, "panic: %s\n", s),                fflush(stderr), __builtin_trap())
+#define PANICF(fmt, ...) (fprintf(stderr, "panic: " fmt "\n", __VA_ARGS__), fflush(stderr), __builtin_trap())
 
-#define SV(s) ((sv){s, sizeof(s) - 1})
+// TODO: ifdef 'UNREACHABLE()' for non-debug builds where we would just
+//       use '__builtin_unreachable()'
+
+#define UNREACHABLE() PANIC("unreachable")
+
+#define SV_STARTS_WITH(sv, static_sz) (sv.len >= (sizeof(static_sz)-1) && memcmp(sv.ptr, static_sz, (sizeof(static_sz)-1)) == 0)
+#define SV_ENDS_WITH(sv, static_sz)   (sv.len >= (sizeof(static_sz)-1) && memcmp(sv.ptr + sv.len - (sizeof(static_sz)-1), static_sz, (sizeof(static_sz)-1)) == 0)
 
 typedef int libc_errno;
 
 typedef struct {
-    void *ptr;
-    int   cap;
-    int   len;
+    union { unsigned char *ptr; char *ptrc; };
+    int cap;
+    int len;
 } sb;
 
 typedef struct {
-    void *ptr;
-    int   len;
+    unsigned char *ptr;
+    int len;
 } sv;
 
 static void
-sb_free(sb *self)
+out_of_memory(void)
 {
-    free(self->ptr);
-    self->ptr = 0;
+    PANIC("out of memory");
+}
+
+static void *
+malloc_or_oom(int size)
+{
+    void *ptr = malloc(size);
+    if (ptr == 0) out_of_memory();
+    return ptr;
+}
+
+static void *
+realloc_or_oom(void *ptr, int size)
+{
+    ptr = realloc(ptr, size);
+    if (ptr == 0) out_of_memory();
+    return ptr;
 }
 
 static void
-sb_ensure_fit(sb *self, int newcap)
+sb_free(sb *sb)
 {
-    if (newcap >= self->cap) {
-        self->ptr = realloc(self->ptr, newcap);
-        if (self->ptr == 0) PANIC("sb_ensure_fit: sorry");
-        self->cap = newcap;
-    }
+    free(sb->ptr);
+    sb->ptr = 0;
 }
 
 static void
-sb_splice(sb *self, int start, int end, void *replace, int replacelen)
+sb_ensure_fit(sb *sb, int newcap)
 {
-    int count = end - start;
+    if (newcap <= sb->cap) return;
+    sb->ptr = realloc_or_oom(sb->ptr, newcap);
+    sb->cap = newcap;
+}
 
-    int newlen = self->len - count + replacelen;
-    sb_ensure_fit(self, newlen);
+static void
+sb_splice(sb *sb, int start, int end, void *replace, int replacelen)
+{
+    int rangelen = end - start;
+    int newlen = sb->len - rangelen + replacelen;
 
-    void *splice_start   = self->ptr + start;
-    void *splice_end     = splice_start + count;
-    void *splice_new_end = splice_start + replacelen;
-    memmove(splice_new_end, splice_end, self->ptr + self->len - splice_end);
+    sb_ensure_fit(sb, newlen);
+
+    unsigned char *splice_start   = sb->ptr + start;
+    unsigned char *splice_end     = splice_start + rangelen;
+    unsigned char *splice_new_end = splice_start + replacelen;
+
+    memmove(splice_new_end, splice_end, sb->ptr + sb->len - splice_end);
     memcpy(splice_start, replace, replacelen);
 
-    self->len = newlen;
-}
-
-static sv
-sv_new(void *ptr, int len)
-{
-    return (sv){ptr, len};
+    sb->len = newlen;
 }
 
 static bool
-sv_eql(sv lhs, sv rhs)
-{
-    return lhs.len == rhs.len && memcmp(lhs.ptr, rhs.ptr, lhs.len) == 0;
-}
-
-static bool
-sv_starts_with(sv self, sv prefix)
-{
-    return sv_eql(sv_new(self.ptr, prefix.len), prefix);
-}
-
-static bool
-sv_ends_with(sv self, sv suffix)
-{
-    return sv_eql(sv_new(self.ptr + self.len - suffix.len, suffix.len), suffix);
-}
-
-static bool
-sz_eql(void *lhs, void *rhs)
+sz_eql(const char *lhs, const char *rhs)
 {
     return strcmp(lhs, rhs) == 0;
 }
@@ -92,34 +96,34 @@ file_try_read(char *fname, sb *dest)
 
     FILE *f = fopen(fname, "rb");
     if (f == 0) {
-        ret = -errno;
+        ret = errno;
         goto ret;
     }
 
     if (fseek(f, 0, SEEK_END) < 0) {
-        ret = -errno;
+        ret = errno;
         goto fclose;
     }
 
     int len = ftell(f);
     if (len < 0) {
-        ret = -errno;
+        ret = errno;
         goto fclose;
     }
 
     if (fseek(f, 0, SEEK_SET) < 0) {
-        ret = -errno;
+        ret = errno;
         goto fclose;
     }
 
     unsigned char *buf = malloc(len);
     if (buf == 0) {
-        ret = -errno;
+        ret = errno;
         goto fclose;
     }
 
     if (fread(buf, 1, len, f) < len) {
-        ret = -errno;
+        ret = errno;
         goto free;
     }
 

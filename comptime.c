@@ -1,6 +1,4 @@
 #include <dlfcn.h>
-#include <stdio.h>
-#include <string.h>
 #include <spawn.h>
 #include <sys/wait.h>
 
@@ -12,7 +10,10 @@
 
 #include "all.h"
 
-extern const TSLanguage *tree_sitter_c(void);
+#define TS_CHILD_NODE(node, fieldname) \
+    ts_node_child_by_field_name(node, fieldname, sizeof(fieldname) - 1)
+
+extern TSLanguage *tree_sitter_c(void);
 
 typedef struct {
     char     *name;
@@ -25,19 +26,14 @@ typedef struct {
     void **stbds_arr_arg_values;
 } fncall;
 
-static sv decl_sv = SV("declarator");
-static sv type_sv = SV("type");
-static sv paramlist_sv = SV("parameters");
-static sv arglist_sv = SV("arguments");
-
 static fndef *stbds_arr_fndefs = 0;
 
 static sv
 node_text(TSNode node, unsigned char *data)
 {
     int start = ts_node_start_byte(node);
-    int end = ts_node_end_byte(node);
-    return sv_new(data + start, end - start);
+    int end   = ts_node_end_byte(node);
+    return (sv){data + start, end - start};
 }
 
 static void
@@ -51,262 +47,295 @@ static void
 print_node_text(TSNode node, unsigned char *data)
 {
     sv text = node_text(node, data);
-    fprintf(stderr, "%.*s\n", text.len, (char *)text.ptr);
+    fprintf(stderr, "%.*s\n", text.len, text.ptr);
 }
 
 static void
 find_fundefs(TSNode node, unsigned char *data)
 {
-    if (sz_eql((void *)ts_node_type(node), "function_definition")) {
-        bool return_is_ptr = false;
-
-        TSNode fun_decl_node = ts_node_child_by_field_name(node, decl_sv.ptr, decl_sv.len);
-        while (!sz_eql((void *)ts_node_type(fun_decl_node), "function_declarator")) {
-            return_is_ptr = true;
-            fun_decl_node = ts_node_child_by_field_name(fun_decl_node, decl_sv.ptr, decl_sv.len);
-            if (ts_node_is_null(fun_decl_node)) PANIC("unreachable");
-        }
-        TSNode fun_ident = ts_node_child_by_field_name(fun_decl_node, decl_sv.ptr, decl_sv.len);
-        if (ts_node_is_null(fun_ident)) PANIC("unreachable");
-
-        sv sv_ident = node_text(fun_ident, data);
-        if (!sv_starts_with(sv_ident, SV("comptime_"))) return;
-
-        fndef fndef = {0};
-
-        fndef.name = malloc(sv_ident.len + 1);
-        memcpy(fndef.name, sv_ident.ptr, sv_ident.len);
-        fndef.name[sv_ident.len] = 0;
-
-        TSNode paramlist = ts_node_child_by_field_name(fun_decl_node, paramlist_sv.ptr, paramlist_sv.len);
-        if (ts_node_is_null(paramlist)) PANIC("unreachable");
-
-        for (int i = 0; i < ts_node_named_child_count(paramlist); i++) {
-            ffi_type paramtype;
-
-            TSNode param = ts_node_named_child(paramlist, i);
-
-            TSNode param_type = ts_node_child_by_field_name(param, type_sv.ptr, type_sv.len);
-            if (ts_node_is_null(param_type)) PANIC("unreachable");
-            sv param_type_text = node_text(param_type, data);
-
-            TSNode param_decl = ts_node_child_by_field_name(param, decl_sv.ptr, decl_sv.len);
-            if (ts_node_is_null(param_decl)) PANIC("unreachable");
-
-            if      (sz_eql((void *)ts_node_type(param_decl), "pointer_declarator")) paramtype = ffi_type_pointer;
-            else if (sv_ends_with(param_type_text, SV("void")))           paramtype = ffi_type_void;
-            else if (sv_ends_with(param_type_text, SV("unsigned long")))  paramtype = ffi_type_uint64;
-            else if (sv_ends_with(param_type_text, SV("unsigned int")))   paramtype = ffi_type_uint32;
-            else if (sv_ends_with(param_type_text, SV("unsigned short"))) paramtype = ffi_type_uint16;
-            else if (sv_ends_with(param_type_text, SV("unsigned char")))  paramtype = ffi_type_uint8;
-            else if (sv_ends_with(param_type_text, SV("long")))           paramtype = ffi_type_sint64;
-            else if (sv_ends_with(param_type_text, SV("int")))            paramtype = ffi_type_sint32;
-            else if (sv_ends_with(param_type_text, SV("short")))          paramtype = ffi_type_sint16;
-            else if (sv_ends_with(param_type_text, SV("char")))           paramtype = ffi_type_sint8;
-            else {
-                fprintf(stderr, "unsupported param type: %.*s\n", param_type_text.len, (char *)param_type_text.ptr);
-                return;
-            }
-            stbds_arrput(fndef.stbds_arr_arg_types, paramtype);
-        }
-
-        TSNode type_node = ts_node_child_by_field_name(node, type_sv.ptr, type_sv.len);
-        if (ts_node_is_null(type_node)) PANIC("unreachable");
-
-        sv type_text = node_text(type_node, data);
-
-        if      (return_is_ptr)                                 fndef.return_type = &ffi_type_pointer;
-        else if (sv_ends_with(type_text, SV("void")))           fndef.return_type = &ffi_type_void;
-        else if (sv_ends_with(type_text, SV("unsigned long")))  fndef.return_type = &ffi_type_uint64;
-        else if (sv_ends_with(type_text, SV("unsigned int")))   fndef.return_type = &ffi_type_uint32;
-        else if (sv_ends_with(type_text, SV("unsigned short"))) fndef.return_type = &ffi_type_uint16;
-        else if (sv_ends_with(type_text, SV("unsigned char")))  fndef.return_type = &ffi_type_uint8;
-        else if (sv_ends_with(type_text, SV("long")))           fndef.return_type = &ffi_type_sint64;
-        else if (sv_ends_with(type_text, SV("int")))            fndef.return_type = &ffi_type_sint32;
-        else if (sv_ends_with(type_text, SV("short")))          fndef.return_type = &ffi_type_sint16;
-        else if (sv_ends_with(type_text, SV("char")))           fndef.return_type = &ffi_type_sint8;
-        else {
-            fprintf(stderr, "unsupported return type: %.*s\n", type_text.len, (char *)type_text.ptr);
-            return;
-        }
-
-        stbds_arrput(stbds_arr_fndefs, fndef);
+    if (!sz_eql(ts_node_type(node), "function_definition")) {
+        for (int i = 0; i < ts_node_named_child_count(node); i++)
+            find_fundefs(ts_node_named_child(node, i), data);
         return;
     }
 
-    for (int i = 0; i < ts_node_named_child_count(node); i++)
-        find_fundefs(ts_node_named_child(node, i), data);
+    bool return_ptr = false;
+
+    TSNode fun_decl_node = TS_CHILD_NODE(node, "declarator");
+    if (ts_node_is_null(fun_decl_node)) UNREACHABLE();
+
+    while (!sz_eql(ts_node_type(fun_decl_node), "function_declarator")) {
+        return_ptr = true;
+        fun_decl_node = TS_CHILD_NODE(fun_decl_node, "declarator");
+        if (ts_node_is_null(fun_decl_node)) UNREACHABLE();
+    }
+
+    TSNode fun_ident_node = TS_CHILD_NODE(fun_decl_node, "declarator");
+    if (ts_node_is_null(fun_ident_node)) UNREACHABLE();
+
+    sv sv_ident = node_text(fun_ident_node, data);
+    if (!SV_STARTS_WITH(sv_ident, "comptime_")) return;
+
+    fndef def = {0};
+
+    def.name = malloc_or_oom(sv_ident.len + 1);
+    memcpy(def.name, sv_ident.ptr, sv_ident.len);
+    def.name[sv_ident.len] = 0;
+
+    TSNode paramlist = TS_CHILD_NODE(fun_decl_node, "parameters");
+    if (ts_node_is_null(paramlist)) UNREACHABLE();
+
+    for (int i = 0; i < ts_node_named_child_count(paramlist); i++) {
+        TSNode param = ts_node_named_child(paramlist, i);
+
+        TSNode param_decl = TS_CHILD_NODE(param, "declarator");
+        if (ts_node_is_null(param_decl)) UNREACHABLE();
+
+        TSNode param_type = TS_CHILD_NODE(param, "type");
+        if (ts_node_is_null(param_type)) UNREACHABLE();
+
+        sv param_type_text = node_text(param_type, data);
+        ffi_type paramtype;
+
+        if      (sz_eql(ts_node_type(param_decl), "pointer_declarator")) paramtype = ffi_type_pointer;
+        else if (SV_ENDS_WITH(param_type_text, "void"))           paramtype = ffi_type_void;
+        else if (SV_ENDS_WITH(param_type_text, "unsigned long"))  paramtype = ffi_type_uint64;
+        else if (SV_ENDS_WITH(param_type_text, "unsigned int"))   paramtype = ffi_type_uint32;
+        else if (SV_ENDS_WITH(param_type_text, "unsigned short")) paramtype = ffi_type_uint16;
+        else if (SV_ENDS_WITH(param_type_text, "unsigned char"))  paramtype = ffi_type_uint8;
+        else if (SV_ENDS_WITH(param_type_text, "long"))           paramtype = ffi_type_sint64;
+        else if (SV_ENDS_WITH(param_type_text, "int"))            paramtype = ffi_type_sint32;
+        else if (SV_ENDS_WITH(param_type_text, "short"))          paramtype = ffi_type_sint16;
+        else if (SV_ENDS_WITH(param_type_text, "char"))           paramtype = ffi_type_sint8;
+        else {
+            fprintf(
+                stderr, "unsupported param type: %.*s\n",
+                param_type_text.len, param_type_text.ptr
+            );
+            return;
+        }
+
+        stbds_arrput(def.stbds_arr_arg_types, paramtype);
+    }
+
+    TSNode return_type_node = TS_CHILD_NODE(node, "type");
+    if (ts_node_is_null(return_type_node)) UNREACHABLE();
+
+    sv return_type_text = node_text(return_type_node, data);
+
+    if      (return_ptr)                                 def.return_type = &ffi_type_pointer;
+    else if (SV_ENDS_WITH(return_type_text, "void"))           def.return_type = &ffi_type_void;
+    else if (SV_ENDS_WITH(return_type_text, "unsigned long"))  def.return_type = &ffi_type_uint64;
+    else if (SV_ENDS_WITH(return_type_text, "unsigned int"))   def.return_type = &ffi_type_uint32;
+    else if (SV_ENDS_WITH(return_type_text, "unsigned short")) def.return_type = &ffi_type_uint16;
+    else if (SV_ENDS_WITH(return_type_text, "unsigned char"))  def.return_type = &ffi_type_uint8;
+    else if (SV_ENDS_WITH(return_type_text, "long"))           def.return_type = &ffi_type_sint64;
+    else if (SV_ENDS_WITH(return_type_text, "int"))            def.return_type = &ffi_type_sint32;
+    else if (SV_ENDS_WITH(return_type_text, "short"))          def.return_type = &ffi_type_sint16;
+    else if (SV_ENDS_WITH(return_type_text, "char"))           def.return_type = &ffi_type_sint8;
+    else {
+        fprintf(
+            stderr, "unsupported return type: %.*s\n",
+            return_type_text.len, return_type_text.ptr
+        );
+        return;
+    }
+
+    stbds_arrput(stbds_arr_fndefs, def);
 }
 
 static bool
 next_fncall(TSNode node, unsigned char *data, fncall *dst, TSNode *dstnode)
 {
-    if (sz_eql((void *)ts_node_type(node), "call_expression")) {
-        static sv fun_sv = SV("function");
-
-        TSNode fun_ident = ts_node_child_by_field_name(node, fun_sv.ptr, fun_sv.len);
-        if (ts_node_is_null(fun_ident)) PANIC("unreachable");
-
-        sv sv_ident = node_text(fun_ident, data);
-        if (!sv_starts_with(sv_ident, SV("comptime_")))
-            goto recurse;
-
-        fncall fncall = {0};
-        fncall.name = malloc(sv_ident.len + 1);
-        memcpy(fncall.name, sv_ident.ptr, sv_ident.len);
-        fncall.name[sv_ident.len] = 0;
-
-        TSNode arglist = ts_node_child_by_field_name(node, arglist_sv.ptr, arglist_sv.len);
-        if (ts_node_is_null(arglist)) PANIC("unreachable");
-
-        // NOTE: Check if we don't have any call expression child.
-        //       If we find one, current node is not a leaf.
-        for (int i = 0; i < ts_node_named_child_count(arglist); i++) {
-            TSNode arg = ts_node_named_child(arglist, i);
-            if (sz_eql((void *)ts_node_type(arg), "call_expression"))
-                if (next_fncall(arg, data, dst, dstnode))
-                    return true;
-        }
-
-        for (int i = 0; i < ts_node_named_child_count(arglist); i++) {
-            TSNode arg = ts_node_named_child(arglist, i);
-            unsigned char *val;
-
-            const char *arg_tstype = ts_node_type(arg);
-            if (sz_eql((void *)arg_tstype, "string_literal")) {
-                sv quoted_string = node_text(arg, data);
-                sv unquoted = sv_new(quoted_string.ptr + 1, quoted_string.len - 2);
-                val = malloc(unquoted.len + 1);
-                memcpy(val, unquoted.ptr, unquoted.len);
-                val[unquoted.len] = 0;
-                stbds_arrput(fncall.stbds_arr_arg_values, &val);
-            } else if (sz_eql((void *)arg_tstype, "number_literal")) {
-                sv unquoted = node_text(arg, data);
-                val = malloc(sizeof(long));
-                *val = atol(unquoted.ptr);
-                stbds_arrput(fncall.stbds_arr_arg_values, val);
-            } else {
-                fprintf(stderr, "unsupported arg type: %s\n", arg_tstype);
-                return false;
-            }
-        }
-
-        *dst = fncall;
-        *dstnode = node;
-        return true;
+    if (!sz_eql(ts_node_type(node), "call_expression")) {
+recurse:
+        for (int i = 0; i < ts_node_named_child_count(node); i++)
+            if (next_fncall(ts_node_named_child(node, i), data, dst, dstnode))
+                return true;
+        return false;
     }
 
-recurse:
-    for (int i = 0; i < ts_node_named_child_count(node); i++)
-        if (next_fncall(ts_node_named_child(node, i), data, dst, dstnode))
-            return true;
-    return false;
+    TSNode fun_ident = TS_CHILD_NODE(node, "function");
+    if (ts_node_is_null(fun_ident)) UNREACHABLE();
+
+    sv sv_ident = node_text(fun_ident, data);
+    if (!SV_STARTS_WITH(sv_ident, "comptime_"))
+        goto recurse;
+
+    fncall call = {0};
+
+    call.name = malloc_or_oom(sv_ident.len + 1);
+    memcpy(call.name, sv_ident.ptr, sv_ident.len);
+    call.name[sv_ident.len] = 0;
+
+    TSNode arglist = TS_CHILD_NODE(node, "arguments");
+    if (ts_node_is_null(arglist)) UNREACHABLE();
+
+    for (int i = 0; i < ts_node_named_child_count(arglist); i++) {
+        TSNode arg = ts_node_named_child(arglist, i);
+        if (sz_eql(ts_node_type(arg), "call_expression"))
+            if (next_fncall(arg, data, dst, dstnode))
+                return true;
+    }
+
+    for (int i = 0; i < ts_node_named_child_count(arglist); i++) {
+        TSNode arg = ts_node_named_child(arglist, i);
+        const char *arg_type = ts_node_type(arg);
+        unsigned char *val;
+
+        if (sz_eql(arg_type, "string_literal")) {
+            sv quoted_string = node_text(arg, data);
+            sv unquoted = (sv){quoted_string.ptr + 1, quoted_string.len - 2};
+
+            val = malloc_or_oom(unquoted.len + 1);
+            memcpy(val, unquoted.ptr, unquoted.len);
+            val[unquoted.len] = 0;
+
+            stbds_arrput(call.stbds_arr_arg_values, &val);
+        } else if (sz_eql(arg_type, "number_literal")) {
+            sv unquoted = node_text(arg, data);
+
+            val = malloc_or_oom(sizeof(long));
+            *val = atol((char *)unquoted.ptr);
+
+            stbds_arrput(call.stbds_arr_arg_values, val);
+        } else {
+            fprintf(stderr, "unsupported argument type: %s\n", arg_type);
+            return false;
+        }
+    }
+
+    *dst = call;
+    *dstnode = node;
+
+    return true;
 }
 
 int
 main(int argc, char **argv, char **envp)
 {
     TSParser *parser = ts_parser_new();
-    ts_parser_set_language(parser, tree_sitter_c());
+    TSLanguage *c_language = tree_sitter_c();
+    if (!ts_parser_set_language(parser, c_language)) {
+        int min = TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION;
+        int cur = ts_language_version(c_language);
+        PANICF(
+            "version mismatch: tree-sitter (>=%d) != tree-sitter-c (=%d)",
+            min, cur
+        );
+    }
 
     sb *stbds_arr_files = 0;
-    char **cc_argv = 0;
+    char **stbds_arr_cc_argv = 0;
 
     char *pwd = getenv("PWD");
     if (pwd == 0) PANIC("PWD environment variable is not set");
 
-    char *so_file = malloc(strlen(pwd) + 1 + sizeof("comptime.so"));
-    sprintf(so_file, "%s/comptime.so", pwd);
+    static char so_fname[256] = {0};
+    if (sprintf(so_fname, "%s/comptime.so", pwd) > sizeof(so_fname))
+        PANIC("buffer overflow occured while building 'comptime.so' path");
 
-    stbds_arrput(cc_argv, "cc");
-    stbds_arrput(cc_argv, "-O2");
-    stbds_arrput(cc_argv, "-shared");
-    stbds_arrput(cc_argv, "-fPIC");
-    stbds_arrput(cc_argv, "-o");
-    stbds_arrput(cc_argv, so_file);
+    stbds_arrput(stbds_arr_cc_argv, "cc");
+    stbds_arrput(stbds_arr_cc_argv, "-O2");
+    stbds_arrput(stbds_arr_cc_argv, "-shared");
+    stbds_arrput(stbds_arr_cc_argv, "-fPIC");
+    stbds_arrput(stbds_arr_cc_argv, "-o");
+    stbds_arrput(stbds_arr_cc_argv, so_fname);
 
     for (int i = 1; i < argc; i++) {
-        stbds_arrput(cc_argv, argv[i]);
-
-        char *arg = argv[i];
-        if (arg[0] == '-') continue;
+        char *fname = argv[i];
+        if (fname[0] == '-') continue;
 
         sb file;
-        int err = file_try_read(arg, &file);
-        if (err < 0) PANIC("%s: %s", arg, strerror(-err));
+        libc_errno err = file_try_read(fname, &file);
+        if (err > 0) PANICF("%s: %s", fname, strerror(err));
 
-        TSTree *tree = ts_parser_parse_string(parser, 0, file.ptr, file.len);
-        find_fundefs(ts_tree_root_node(tree), file.ptr);
+        TSTree *tree = ts_parser_parse_string(parser, 0, file.ptrc, file.len);
+        TSNode root = ts_tree_root_node(tree);
+        find_fundefs(root, file.ptr);
 
         stbds_arrput(stbds_arr_files, file);
+        stbds_arrput(stbds_arr_cc_argv, fname);
     }
 
-    int files_len = stbds_arrlen(stbds_arr_files);
-    int fndefs_len = stbds_arrlen(stbds_arr_fndefs);
-
-    int cc_argc = stbds_arrlen(cc_argv);
-    for (int i = 0; i < cc_argc; i++) {
-        fprintf(stderr, "%s ", cc_argv[i]);
-    }
+    fputs("comptime: ", stderr);
+    for (int i = 0; i < stbds_arrlen(stbds_arr_cc_argv); i++)
+        fprintf(stderr, "%s ", stbds_arr_cc_argv[i]);
     fputc('\n', stderr);
 
     pid_t cc_pid;
-    int error = posix_spawnp(&cc_pid, "cc", 0, 0, cc_argv, envp);
-    if (error < 0) PANIC("system error: %d", error);
+    if (posix_spawnp(&cc_pid, "cc", 0, 0, stbds_arr_cc_argv, envp) < 0)
+        PANIC(strerror(errno));
 
     int status;
-    if (wait(&status) < 0) PANIC("system error: %s", strerror(errno));
-    if (!WIFEXITED(status)) PANIC("comptime cc exited abnormally");
-    if (WEXITSTATUS(status) != 0) PANIC("comptime cc exited with non-zero status code");
+    if (wait(&status) < 0)
+        PANIC(strerror(errno));
+    if (!WIFEXITED(status))
+        PANIC("cc subprocess exited abnormally");
+    if (WEXITSTATUS(status) != 0)
+        PANIC("cc subprocess exited with non-zero status code");
 
-    void *dl = dlopen(so_file, RTLD_LAZY);
-    if (dl == 0) PANIC("%s", dlerror());
+    void *dl = dlopen(so_fname, RTLD_LAZY);
+    if (dl == 0) PANIC(dlerror());
 
     while (1) {
-        sb *file2;
+        sb *file;
         fncall fncall;
         TSNode callnode;
         bool callfound = false;
 
-        for (int i = 0; i < files_len; i++) {
-            file2 = &stbds_arr_files[i];
-            TSTree *tree = ts_parser_parse_string(parser, 0, file2->ptr, file2->len);
+        // NOTE: Because subsequent iterations mutate the file buffers,
+        //       we keep parsing the files until there is no more
+        //       function calls to process.
 
-            if (next_fncall(ts_tree_root_node(tree), file2->ptr, &fncall, &callnode)) {
-                callfound = true;
-                break;
-            }
+        for (int i = 0; i < stbds_arrlen(stbds_arr_files); i++) {
+            file = &stbds_arr_files[i];
+            TSTree *tree = ts_parser_parse_string(parser, 0, file->ptrc, file->len);
+            TSNode root = ts_tree_root_node(tree);
+
+            callfound = next_fncall(root, file->ptr, &fncall, &callnode);
+            if (callfound) break;
         }
         if (!callfound) break;
 
         fndef *def = 0;
-        for (int i = 0; i < fndefs_len; i++) {
+        for (int i = 0; i < stbds_arrlen(stbds_arr_fndefs); i++) {
             fndef cur = stbds_arr_fndefs[i];
             if (sz_eql(cur.name, fncall.name)) {
                 def = &stbds_arr_fndefs[i];
                 break;
             }
         }
-        if (def == 0) PANIC("found comptime call without its definition");
+        if (def == 0)
+            PANIC("found comptime function call without matching definition");
 
-        void *fn = dlsym(dl, def->name);
-        if (fn == 0) PANIC("couldn't find '%s'", def->name);
+        void (*fn)(void) = dlsym(dl, def->name);
+        if (fn == 0) PANIC(dlerror());
 
         ffi_cif cif = {0};
-        ffi_status status = ffi_prep_cif(&cif, FFI_DEFAULT_ABI, stbds_arrlen(def->stbds_arr_arg_types), def->return_type, &def->stbds_arr_arg_types);
-        if (status != FFI_OK) PANIC("ffi died");
+        ffi_status status = ffi_prep_cif(
+            &cif, FFI_DEFAULT_ABI,
+            stbds_arrlen(def->stbds_arr_arg_types),
+            def->return_type,
+            &def->stbds_arr_arg_types
+        );
+        if (status != FFI_OK) PANIC("couldn't prepare comptime function call");
 
-        // HACK: retval is 64-bit long. Maybe that's enough for us
+        // NOTE: 'retval' is 64-bit long. We may want change that later.
         unsigned char retval[8] = {0};
+
         ffi_call(&cif, fn, retval, fncall.stbds_arr_arg_values);
 
-        // HACK: Static string
+        // HACK: Static string, assuming the rendered string doesn't overflow.
         static char replace[256];
         int replacelen;
 
         ffi_type *ffi_rettype = def->return_type;
 
-        // TODO: ffi_type_pointer is handled so badly. It only works null-terminated strings.
+        // TODO: 'ffi_type_pointer' is handled so badly.
+        //       It only works for null-terminated strings.
+        //       Maybe turn this into an array of bytes?
+
         if      (ffi_rettype == &ffi_type_pointer) { replacelen = sprintf(replace, "\"%.*s\"", (int)strlen(*(char **)retval), *(char **)retval); }
         else if (ffi_rettype == &ffi_type_void)    { replacelen = 0; }
         else if (ffi_rettype == &ffi_type_uint64)  { replacelen = sprintf(replace, "%lu", *(unsigned long *) retval); }
@@ -317,16 +346,14 @@ main(int argc, char **argv, char **envp)
         else if (ffi_rettype == &ffi_type_sint32)  { replacelen = sprintf(replace, "%d",  *(int *)  retval); }
         else if (ffi_rettype == &ffi_type_sint16)  { replacelen = sprintf(replace, "%d",  *(short *)retval); }
         else if (ffi_rettype == &ffi_type_sint8)   { replacelen = sprintf(replace, "%d",  *(char *) retval); }
-        else PANIC("unsupported ffi type: %p\n", ffi_rettype);
+        else PANIC("unhandled return ffi type");
+
+        if (replacelen > sizeof(replace))
+            PANIC("buffer overflow occured while rendering comptime return value");
 
         int start = ts_node_start_byte(callnode);
         int end = ts_node_end_byte(callnode);
-        sb_splice(file2, start, end, replace, replacelen);
-
-        // DEBUG
-        fprintf(stderr, "%.*s\n", file2->len, (char *)file2->ptr);
-
-        puts(fncall.name);
+        sb_splice(file, start, end, replace, replacelen);
     }
 
     return 0;
