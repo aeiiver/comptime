@@ -242,20 +242,28 @@ main(int argc, char **argv, char **envp)
     stbds_arrput(stbds_arr_cc_argv, "-o");
     stbds_arrput(stbds_arr_cc_argv, so_fname);
 
+    char *output_file = "a.out";
+
     for (int i = 1; i < argc; i++) {
-        char *fname = argv[i];
-        if (fname[0] == '-') continue;
+        char *arg = argv[i];
+
+        if (arg[0] == '-' && arg[1] == 'o') {
+            output_file = argv[i + 1];
+            i += 1;
+            continue;
+        }
+        stbds_arrput(stbds_arr_cc_argv, arg);
+        if (arg[0] == '-') continue;
 
         sb file;
-        libc_errno err = file_try_read(fname, &file);
-        if (err > 0) PANICF("%s: %s", fname, strerror(err));
+        libc_errno err = file_try_read(arg, &file);
+        if (err > 0) PANICF("%s: %s", arg, strerror(err));
 
         TSTree *tree = ts_parser_parse_string(parser, 0, file.ptrc, file.len);
         TSNode root = ts_tree_root_node(tree);
         find_fundefs(root, file.ptr);
 
         stbds_arrput(stbds_arr_files, file);
-        stbds_arrput(stbds_arr_cc_argv, fname);
     }
 
     fputs("comptime: ", stderr);
@@ -355,6 +363,9 @@ main(int argc, char **argv, char **envp)
         int end = ts_node_end_byte(callnode);
         sb_splice(file, start, end, replace, replacelen);
     }
+
+    // DEBUG
+    printf("final output is '%s'\n", output_file);
 
     return 0;
 }
