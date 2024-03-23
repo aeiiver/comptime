@@ -1,6 +1,7 @@
 #include <dlfcn.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include "ffi.h"
 #define STB_DS_IMPLEMENTATION
@@ -227,6 +228,7 @@ main(int argc, char **argv, char **envp)
 
     sb *stbds_arr_files = 0;
     char **stbds_arr_cc_argv = 0;
+    char **stbds_arr_cc2_argv = 0;
 
     char *pwd = getenv("PWD");
     if (pwd == 0) PANIC("PWD environment variable is not set");
@@ -242,18 +244,18 @@ main(int argc, char **argv, char **envp)
     stbds_arrput(stbds_arr_cc_argv, "-o");
     stbds_arrput(stbds_arr_cc_argv, so_fname);
 
-    char *output_file = "a.out";
-
     for (int i = 1; i < argc; i++) {
         char *arg = argv[i];
 
         if (arg[0] == '-' && arg[1] == 'o') {
-            output_file = argv[i + 1];
             i += 1;
             continue;
         }
         stbds_arrput(stbds_arr_cc_argv, arg);
         if (arg[0] == '-') continue;
+
+        sv arg_as_sv = (sv){(void *)arg, strlen(arg)};
+        if (!SV_ENDS_WITH(arg_as_sv, ".c")) continue;
 
         sb file;
         libc_errno err = file_try_read(arg, &file);
@@ -266,9 +268,37 @@ main(int argc, char **argv, char **envp)
         stbds_arrput(stbds_arr_files, file);
     }
 
+    stbds_arrput(stbds_arr_cc2_argv, "cc");
+    stbds_arrput(stbds_arr_cc2_argv, "-xc");
+    stbds_arrput(stbds_arr_cc2_argv, "-");
+    stbds_arrput(stbds_arr_cc2_argv, "-xnone");
+
+    for (int i = 1; i < argc; i++) {
+        char *arg = argv[i];
+
+        if (arg[0] == '-') {
+            stbds_arrput(stbds_arr_cc2_argv, arg);
+            if (arg[1] == 'o') {
+                stbds_arrput(stbds_arr_cc2_argv, argv[i + 1]);
+                i += 1;
+            }
+            continue;
+        }
+
+        sv arg_as_sv = (sv){(void *)arg, strlen(arg)};
+        if (SV_ENDS_WITH(arg_as_sv, ".c")) continue;
+
+        stbds_arrput(stbds_arr_cc2_argv, arg);
+    }
+
     fputs("comptime: ", stderr);
     for (int i = 0; i < stbds_arrlen(stbds_arr_cc_argv); i++)
         fprintf(stderr, "%s ", stbds_arr_cc_argv[i]);
+    fputc('\n', stderr);
+
+    fputs("comptime: ", stderr);
+    for (int i = 0; i < stbds_arrlen(stbds_arr_cc2_argv); i++)
+        fprintf(stderr, "%s ", stbds_arr_cc2_argv[i]);
     fputc('\n', stderr);
 
     pid_t cc_pid;
@@ -364,8 +394,41 @@ main(int argc, char **argv, char **envp)
         sb_splice(file, start, end, replace, replacelen);
     }
 
-    // DEBUG
-    printf("final output is '%s'\n", output_file);
+    static int parent_to_child_fds[2] = {0};
+    if (pipe(parent_to_child_fds) < 0) PANIC(strerror(errno));
+
+    switch (fork()) {
+    case -1:
+        PANIC(strerror(errno));
+
+    case 0: {
+        if (close(parent_to_child_fds[1]) < 0)
+            PANIC(strerror(errno));
+        if (dup2(parent_to_child_fds[0], STDIN_FILENO) < 0)
+            PANIC(strerror(errno));
+        execvp(stbds_arr_cc2_argv[0], stbds_arr_cc2_argv);
+        PANIC(strerror(errno));
+    } break;
+
+    default:
+        if (close(parent_to_child_fds[0]) < 0)
+            PANIC(strerror(errno));
+        for (int i = 0; i < stbds_arrlen(stbds_arr_files); i++) {
+            sb file = stbds_arr_files[i];
+            if (write(parent_to_child_fds[1], file.ptr, file.len) < 0)
+                PANIC(strerror(errno));
+        }
+        if (close(parent_to_child_fds[1]) < 0)
+            PANIC(strerror(errno));
+
+        int status;
+        if (wait(&status) < 0)
+            PANIC(strerror(errno));
+        if (!WIFEXITED(status))
+            PANIC("cc subprocess exited abnormally");
+        if (WEXITSTATUS(status) != 0)
+            PANIC("cc subprocess exited with non-zero status code");
+    }
 
     return 0;
 }
