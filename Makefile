@@ -22,8 +22,8 @@ external/tree-sitter-c-0.20.7/src/parser.o:
 		$(CC) -c parser.c
 
 external/libffi-3.4.6/build/usr/lib/libffi.a:
-	cd external/libffi-3.4.6/;            \
-		make build;                       \
-		cd build;                         \
-		../configure --prefix=$(PWD)/usr; \
+	cd external/libffi-3.4.6/;                          \
+		mkdir build;                                    \
+		cd build;                                       \
+		../configure --prefix=$$PWD/usr --disable-docs; \
 		make && make install
