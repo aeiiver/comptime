@@ -237,6 +237,14 @@ main(int argc, char **argv, char **envp)
     if (sprintf(so_fname, "%s/comptime.so", pwd) > sizeof(so_fname))
         PANIC("buffer overflow occured while building 'comptime.so' path");
 
+    FILE *so_file = fopen(so_fname, "abx");
+    if (so_file == 0) {
+        if (errno == EEXIST)
+            PANIC("file 'comptime.so' already exists but it isn't owned by comptime");
+        PANIC(strerror(errno));
+    }
+    if (fclose(so_file) < 0) PANIC(strerror(errno));
+
     stbds_arrput(stbds_arr_cc_argv, "cc");
     stbds_arrput(stbds_arr_cc_argv, "-O2");
     stbds_arrput(stbds_arr_cc_argv, "-shared");
@@ -429,6 +437,12 @@ main(int argc, char **argv, char **envp)
         if (WEXITSTATUS(status) != 0)
             PANIC("cc subprocess exited with non-zero status code");
     }
+
+    // NOTE: Incoming dangerous operation. Surely a previous check would
+    //       have ensured that the shared object file is owned by us.
+
+    if (remove(so_fname) < 0)
+        PANIC(strerror(errno));
 
     return 0;
 }
