@@ -233,6 +233,9 @@ main(int argc, char **argv, char **envp)
     char *pwd = getenv("PWD");
     if (pwd == 0) PANIC("PWD environment variable is not set");
 
+    char *cc = getenv("CC");
+    if (cc == 0) cc = "cc";
+
     static char so_fname[256] = {0};
     if (sprintf(so_fname, "%s/comptime.so", pwd) > sizeof(so_fname))
         PANIC("buffer overflow occured while building 'comptime.so' path");
@@ -245,7 +248,7 @@ main(int argc, char **argv, char **envp)
     }
     if (fclose(so_file) < 0) PANIC(strerror(errno));
 
-    stbds_arrput(stbds_arr_cc_argv, "cc");
+    stbds_arrput(stbds_arr_cc_argv, cc);
     stbds_arrput(stbds_arr_cc_argv, "-O2");
     stbds_arrput(stbds_arr_cc_argv, "-shared");
     stbds_arrput(stbds_arr_cc_argv, "-fPIC");
@@ -276,7 +279,7 @@ main(int argc, char **argv, char **envp)
         stbds_arrput(stbds_arr_files, file);
     }
 
-    stbds_arrput(stbds_arr_cc2_argv, "cc");
+    stbds_arrput(stbds_arr_cc2_argv, cc);
     stbds_arrput(stbds_arr_cc2_argv, "-xc");
     stbds_arrput(stbds_arr_cc2_argv, "-");
     stbds_arrput(stbds_arr_cc2_argv, "-xnone");
@@ -310,7 +313,7 @@ main(int argc, char **argv, char **envp)
     fputc('\n', stderr);
 
     pid_t cc_pid;
-    if (posix_spawnp(&cc_pid, "cc", 0, 0, stbds_arr_cc_argv, envp) < 0)
+    if (posix_spawnp(&cc_pid, stbds_arr_cc_argv[0], 0, 0, stbds_arr_cc_argv, envp) < 0)
         PANIC(strerror(errno));
 
     int status;
