@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define SHIFT_ARGS(argc, argv) (argc--, *argv++)
+
 #define PANIC(s)         (fprintf(stderr, "panic: %s\n", s),                fflush(stderr), __builtin_trap())
 #define PANICF(fmt, ...) (fprintf(stderr, "panic: " fmt "\n", __VA_ARGS__), fflush(stderr), __builtin_trap())
 

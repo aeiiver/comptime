@@ -226,6 +226,37 @@ main(int argc, char **argv, char **envp)
         );
     }
 
+    char *program = SHIFT_ARGS(argc, argv);
+    char **stbds_arr_funcs_to_run = 0;
+
+    // TODO: Clean up this mess. CLI is cool and all but the following
+    //       looks odd enough.
+
+    while (argc > 0) {
+        char *arg = SHIFT_ARGS(argc, argv);
+        if (arg[0] != '-') {
+show_usage:
+            fprintf(stderr, "usage: %s [options] -- compiler_args\n", program);
+            fprintf(stderr, "\n");
+            fprintf(stderr, "options:\n");
+            fprintf(stderr, "    --run    Run function after preprocessing\n");
+            fprintf(stderr, "    --help   Show this usage message\n");
+            exit(-1);
+        }
+        char *option_name = arg + 2;
+
+        if (*option_name == 0) {
+            break;
+        } else if (sz_eql(option_name, "run")) {
+            stbds_arrput(stbds_arr_funcs_to_run, SHIFT_ARGS(argc, argv));
+        } else if (sz_eql(option_name, "help")) {
+            goto show_usage;
+        } else {
+            fprintf(stderr, "%s: unknown option '%s'\n", program, option_name);
+            exit(-1);
+        }
+    }
+
     sb *stbds_arr_files = 0;
     char **stbds_arr_cc_argv = 0;
     char **stbds_arr_cc2_argv = 0;
@@ -255,7 +286,7 @@ main(int argc, char **argv, char **envp)
     stbds_arrput(stbds_arr_cc_argv, "-o");
     stbds_arrput(stbds_arr_cc_argv, so_fname);
 
-    for (int i = 1; i < argc; i++) {
+    for (int i = 0; i < argc; i++) {
         char *arg = argv[i];
 
         if (arg[0] == '-' && arg[1] == 'o') {
@@ -284,7 +315,7 @@ main(int argc, char **argv, char **envp)
     stbds_arrput(stbds_arr_cc2_argv, "-");
     stbds_arrput(stbds_arr_cc2_argv, "-xnone");
 
-    for (int i = 1; i < argc; i++) {
+    for (int i = 0; i < argc; i++) {
         char *arg = argv[i];
 
         if (arg[0] == '-') {
