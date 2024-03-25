@@ -75,8 +75,6 @@ find_fundefs(TSNode node, unsigned char *data)
     if (ts_node_is_null(fun_ident_node)) UNREACHABLE();
 
     sv sv_ident = node_text(fun_ident_node, data);
-    if (!SV_STARTS_WITH(sv_ident, "comptime_")) return;
-
     fndef def = {0};
 
     def.name = malloc_or_oom(sv_ident.len + 1);
@@ -89,8 +87,9 @@ find_fundefs(TSNode node, unsigned char *data)
     for (int i = 0; i < ts_node_named_child_count(paramlist); i++) {
         TSNode param = ts_node_named_child(paramlist, i);
 
+        bool maybe_pointer = true;
         TSNode param_decl = TS_CHILD_NODE(param, "declarator");
-        if (ts_node_is_null(param_decl)) UNREACHABLE();
+        if (ts_node_is_null(param_decl)) maybe_pointer = false;
 
         TSNode param_type = TS_CHILD_NODE(param, "type");
         if (ts_node_is_null(param_type)) UNREACHABLE();
@@ -98,7 +97,7 @@ find_fundefs(TSNode node, unsigned char *data)
         sv param_type_text = node_text(param_type, data);
         ffi_type paramtype;
 
-        if      (sz_eql(ts_node_type(param_decl), "pointer_declarator")) paramtype = ffi_type_pointer;
+        if      (maybe_pointer && sz_eql(ts_node_type(param_decl), "pointer_declarator")) paramtype = ffi_type_pointer;
         else if (SV_ENDS_WITH(param_type_text, "void"))           paramtype = ffi_type_void;
         else if (SV_ENDS_WITH(param_type_text, "unsigned long"))  paramtype = ffi_type_uint64;
         else if (SV_ENDS_WITH(param_type_text, "unsigned int"))   paramtype = ffi_type_uint32;
@@ -146,15 +145,17 @@ find_fundefs(TSNode node, unsigned char *data)
 }
 
 static bool
-next_fncall(TSNode node, unsigned char *data, fncall *dst, TSNode *dstnode)
+next_fncall2(TSNode node, unsigned char *data, fncall *dst, TSNode *dstnode)
 {
     if (!sz_eql(ts_node_type(node), "call_expression")) {
 recurse:
         for (int i = 0; i < ts_node_named_child_count(node); i++)
-            if (next_fncall(ts_node_named_child(node, i), data, dst, dstnode))
+            if (next_fncall2(ts_node_named_child(node, i), data, dst, dstnode))
                 return true;
         return false;
     }
+
+    print_node_text(node, data);
 
     TSNode fun_ident = TS_CHILD_NODE(node, "function");
     if (ts_node_is_null(fun_ident)) UNREACHABLE();
@@ -175,7 +176,7 @@ recurse:
     for (int i = 0; i < ts_node_named_child_count(arglist); i++) {
         TSNode arg = ts_node_named_child(arglist, i);
         if (sz_eql(ts_node_type(arg), "call_expression"))
-            if (next_fncall(arg, data, dst, dstnode))
+            if (next_fncall2(arg, data, dst, dstnode))
                 return true;
     }
 
@@ -210,6 +211,31 @@ recurse:
     *dstnode = node;
 
     return true;
+}
+
+static bool
+next_fncall(TSNode node, unsigned char *data, fncall *dst, TSNode *dstnode)
+{
+    TSNode comment_node;
+    bool found_comptime_comment = false;
+
+    for (int i = 0; i < ts_node_child_count(node); i++) {
+        TSNode child = ts_node_child(node, i);
+        bool is_comment = sz_eql(ts_node_type(child), "comment");
+        if (is_comment && SV_EQL(node_text(child, data), "/* @comptime */")) {
+            comment_node = child;
+            found_comptime_comment = true;
+            break;
+        }
+    }
+
+    if (found_comptime_comment)
+        return next_fncall2(ts_node_next_sibling(comment_node), data, dst, dstnode);
+
+    for (int i = 0; i < ts_node_child_count(node); i++)
+        if (next_fncall(ts_node_child(node, i), data, dst, dstnode))
+            return true;
+    return false;
 }
 
 int
@@ -258,6 +284,7 @@ show_usage:
     }
 
     sb *stbds_arr_files = 0;
+    char **stbds_arr_ccE_argv = 0;
     char **stbds_arr_cc_argv = 0;
     char **stbds_arr_cc2_argv = 0;
 
@@ -278,6 +305,9 @@ show_usage:
         PANIC(strerror(errno));
     }
     if (fclose(so_file) < 0) PANIC(strerror(errno));
+
+    stbds_arrput(stbds_arr_ccE_argv, cc);
+    stbds_arrput(stbds_arr_ccE_argv, "-E");
 
     stbds_arrput(stbds_arr_cc_argv, cc);
     stbds_arrput(stbds_arr_cc_argv, "-O2");
@@ -307,6 +337,7 @@ show_usage:
         TSNode root = ts_tree_root_node(tree);
         find_fundefs(root, file.ptr);
 
+        stbds_arrput(stbds_arr_ccE_argv, arg);
         stbds_arrput(stbds_arr_files, file);
     }
 
@@ -334,6 +365,11 @@ show_usage:
     }
 
     fputs("comptime: ", stderr);
+    for (int i = 0; i < stbds_arrlen(stbds_arr_ccE_argv); i++)
+        fprintf(stderr, "%s ", stbds_arr_ccE_argv[i]);
+    fputc('\n', stderr);
+
+    fputs("comptime: ", stderr);
     for (int i = 0; i < stbds_arrlen(stbds_arr_cc_argv); i++)
         fprintf(stderr, "%s ", stbds_arr_cc_argv[i]);
     fputc('\n', stderr);
@@ -342,6 +378,54 @@ show_usage:
     for (int i = 0; i < stbds_arrlen(stbds_arr_cc2_argv); i++)
         fprintf(stderr, "%s ", stbds_arr_cc2_argv[i]);
     fputc('\n', stderr);
+
+    static unsigned char expanded_blob[0x100000] = {0};
+    int expanded_blob_len = 0;
+
+    {
+        static int child_to_parent_fds[2] = {0};
+        if (pipe(child_to_parent_fds) < 0) PANIC(strerror(errno));
+
+        switch (fork()) {
+        case -1:
+            PANIC(strerror(errno));
+
+        case 0:
+            if (close(child_to_parent_fds[0]) < 0)
+                PANIC(strerror(errno));
+            if (dup2(child_to_parent_fds[1], STDOUT_FILENO) < 0)
+                PANIC(strerror(errno));
+            execvp(stbds_arr_ccE_argv[0], stbds_arr_ccE_argv);
+            PANIC(strerror(errno));
+
+        default:
+            if (close(child_to_parent_fds[1]) < 0)
+                PANIC(strerror(errno));
+
+            unsigned char *read_cursor = expanded_blob;
+            int remaining_size = sizeof(expanded_blob);
+            while (1) {
+                if (remaining_size == 0) PANIC("expanded blob buffer is full");
+                int nbytes = read(child_to_parent_fds[0], read_cursor, remaining_size);
+                if (nbytes == -1) PANIC(strerror(errno));
+                else if (nbytes == 0) break;
+                read_cursor += nbytes;
+                remaining_size -= nbytes;
+            }
+            expanded_blob_len = read_cursor - expanded_blob;
+
+            if (close(child_to_parent_fds[0]) < 0)
+                PANIC(strerror(errno));
+
+            int status;
+            if (wait(&status) < 0)
+                PANIC(strerror(errno));
+            if (!WIFEXITED(status))
+                PANIC("cc subprocess exited abnormally");
+            if (WEXITSTATUS(status) != 0)
+                PANIC("cc subprocess exited with non-zero status code");
+        }
+    }
 
     pid_t cc_pid;
     if (posix_spawnp(&cc_pid, stbds_arr_cc_argv[0], 0, 0, stbds_arr_cc_argv, envp) < 0)

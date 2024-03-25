@@ -11,7 +11,7 @@ SRCS := comptime.c $(LIBS)
 #       for GCC and Clang.
 
 comptime: $(SRCS)
-	$(CC) -g3 -std=c99 -Wmissing-prototypes $(INCS) $(SRCS)
+	$(CC) -g3 -std=c99 -Wmissing-prototypes -fsanitize=undefined $(INCS) $(SRCS)
 
 test_selfhost:
 	./a.out -o comptime2 -g3 -std=c99 -Wmissing-prototypes $(INCS) comptime.c \

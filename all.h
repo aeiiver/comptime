@@ -4,16 +4,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define PASTE(x)  PASTE2(x)
+#define PASTE2(x) #x
+#define FILELOC __FILE__ ":" PASTE(__LINE__)
+
 #define SHIFT_ARGS(argc, argv) (argc--, *argv++)
 
-#define PANIC(s)         (fprintf(stderr, "panic: %s\n", s),                fflush(stderr), __builtin_trap())
-#define PANICF(fmt, ...) (fprintf(stderr, "panic: " fmt "\n", __VA_ARGS__), fflush(stderr), __builtin_trap())
+#define PANIC(s)         (fprintf(stderr, FILELOC ": panic: %s\n", s),                fflush(stderr), __builtin_trap())
+#define PANICF(fmt, ...) (fprintf(stderr, FILELOC ": panic: " fmt "\n", __VA_ARGS__), fflush(stderr), __builtin_trap())
 
 // TODO: ifdef 'UNREACHABLE()' for non-debug builds where we would just
 //       use '__builtin_unreachable()'
 
 #define UNREACHABLE() PANIC("unreachable")
 
+#define SV_EQL(sv, static_sz)         (sv.len == (sizeof(static_sz)-1) && memcmp(sv.ptr, static_sz, (sizeof(static_sz)-1)) == 0)
 #define SV_STARTS_WITH(sv, static_sz) (sv.len >= (sizeof(static_sz)-1) && memcmp(sv.ptr, static_sz, (sizeof(static_sz)-1)) == 0)
 #define SV_ENDS_WITH(sv, static_sz)   (sv.len >= (sizeof(static_sz)-1) && memcmp(sv.ptr + sv.len - (sizeof(static_sz)-1), static_sz, (sizeof(static_sz)-1)) == 0)
 
