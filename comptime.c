@@ -16,10 +16,13 @@
 
 extern TSLanguage *tree_sitter_c(void);
 
+// TODO: Handle variadic functions
+
 typedef struct {
-    char     *name;
-    ffi_type *stbds_arr_arg_types;
-    ffi_type *return_type;
+    char      *name;
+    ffi_type **stbds_arr_arg_types;
+    ffi_type  *return_type;
+    bool       is_variadic;
 } fndef;
 
 typedef struct {
@@ -54,7 +57,8 @@ print_node_text(TSNode node, unsigned char *data)
 static void
 find_fundefs(TSNode node, unsigned char *data)
 {
-    if (!sz_eql(ts_node_type(node), "function_definition")) {
+    bool is_decl = sz_eql(ts_node_type(node), "declaration");
+    if (!is_decl && !sz_eql(ts_node_type(node), "function_definition")) {
         for (int i = 0; i < ts_node_named_child_count(node); i++)
             find_fundefs(ts_node_named_child(node, i), data);
         return;
@@ -68,7 +72,7 @@ find_fundefs(TSNode node, unsigned char *data)
     while (!sz_eql(ts_node_type(fun_decl_node), "function_declarator")) {
         return_ptr = true;
         fun_decl_node = TS_CHILD_NODE(fun_decl_node, "declarator");
-        if (ts_node_is_null(fun_decl_node)) UNREACHABLE();
+        if (ts_node_is_null(fun_decl_node)) return;
     }
 
     TSNode fun_ident_node = TS_CHILD_NODE(fun_decl_node, "declarator");
@@ -87,6 +91,11 @@ find_fundefs(TSNode node, unsigned char *data)
     for (int i = 0; i < ts_node_named_child_count(paramlist); i++) {
         TSNode param = ts_node_named_child(paramlist, i);
 
+        if (sz_eql(ts_node_type(param), "variadic_parameter")) {
+            def.is_variadic = true;
+            break;
+        }
+
         bool maybe_pointer = true;
         TSNode param_decl = TS_CHILD_NODE(param, "declarator");
         if (ts_node_is_null(param_decl)) maybe_pointer = false;
@@ -95,18 +104,18 @@ find_fundefs(TSNode node, unsigned char *data)
         if (ts_node_is_null(param_type)) UNREACHABLE();
 
         sv param_type_text = node_text(param_type, data);
-        ffi_type paramtype;
+        ffi_type *paramtype;
 
-        if      (maybe_pointer && sz_eql(ts_node_type(param_decl), "pointer_declarator")) paramtype = ffi_type_pointer;
-        else if (SV_ENDS_WITH(param_type_text, "void"))           paramtype = ffi_type_void;
-        else if (SV_ENDS_WITH(param_type_text, "unsigned long"))  paramtype = ffi_type_uint64;
-        else if (SV_ENDS_WITH(param_type_text, "unsigned int"))   paramtype = ffi_type_uint32;
-        else if (SV_ENDS_WITH(param_type_text, "unsigned short")) paramtype = ffi_type_uint16;
-        else if (SV_ENDS_WITH(param_type_text, "unsigned char"))  paramtype = ffi_type_uint8;
-        else if (SV_ENDS_WITH(param_type_text, "long"))           paramtype = ffi_type_sint64;
-        else if (SV_ENDS_WITH(param_type_text, "int"))            paramtype = ffi_type_sint32;
-        else if (SV_ENDS_WITH(param_type_text, "short"))          paramtype = ffi_type_sint16;
-        else if (SV_ENDS_WITH(param_type_text, "char"))           paramtype = ffi_type_sint8;
+        if      (maybe_pointer && sz_eql(ts_node_type(param_decl), "pointer_declarator")) paramtype = &ffi_type_pointer;
+        else if (SV_ENDS_WITH(param_type_text, "void"))           paramtype = &ffi_type_void;
+        else if (SV_ENDS_WITH(param_type_text, "unsigned long"))  paramtype = &ffi_type_uint64;
+        else if (SV_ENDS_WITH(param_type_text, "unsigned int"))   paramtype = &ffi_type_uint32;
+        else if (SV_ENDS_WITH(param_type_text, "unsigned short")) paramtype = &ffi_type_uint16;
+        else if (SV_ENDS_WITH(param_type_text, "unsigned char"))  paramtype = &ffi_type_uint8;
+        else if (SV_ENDS_WITH(param_type_text, "long"))           paramtype = &ffi_type_sint64;
+        else if (SV_ENDS_WITH(param_type_text, "int"))            paramtype = &ffi_type_sint32;
+        else if (SV_ENDS_WITH(param_type_text, "short"))          paramtype = &ffi_type_sint16;
+        else if (SV_ENDS_WITH(param_type_text, "char"))           paramtype = &ffi_type_sint8;
         else {
             fprintf(
                 stderr, "unsupported param type: %.*s\n",
@@ -115,6 +124,8 @@ find_fundefs(TSNode node, unsigned char *data)
             return;
         }
 
+        // You may have a compiler warning on the following line.
+        // It's safe to ignore because we do want to store addresses.
         stbds_arrput(def.stbds_arr_arg_types, paramtype);
     }
 
@@ -161,9 +172,6 @@ recurse:
     if (ts_node_is_null(fun_ident)) UNREACHABLE();
 
     sv sv_ident = node_text(fun_ident, data);
-    if (!SV_STARTS_WITH(sv_ident, "comptime_"))
-        goto recurse;
-
     fncall call = {0};
 
     call.name = malloc_or_oom(sv_ident.len + 1);
@@ -193,7 +201,10 @@ recurse:
             memcpy(val, unquoted.ptr, unquoted.len);
             val[unquoted.len] = 0;
 
-            stbds_arrput(call.stbds_arr_arg_values, &val);
+            void **val_addr = malloc_or_oom(sizeof(*val));
+            *val_addr = val;
+
+            stbds_arrput(call.stbds_arr_arg_values, val_addr);
         } else if (sz_eql(arg_type, "number_literal")) {
             sv unquoted = node_text(arg, data);
 
@@ -229,8 +240,10 @@ next_fncall(TSNode node, unsigned char *data, fncall *dst, TSNode *dstnode)
         }
     }
 
-    if (found_comptime_comment)
-        return next_fncall2(ts_node_next_sibling(comment_node), data, dst, dstnode);
+    if (found_comptime_comment) {
+        if (next_fncall2(ts_node_next_sibling(comment_node), data, dst, dstnode))
+            return true;
+    }
 
     for (int i = 0; i < ts_node_child_count(node); i++)
         if (next_fncall(ts_node_child(node, i), data, dst, dstnode))
@@ -333,13 +346,11 @@ show_usage:
         libc_errno err = file_try_read(arg, &file);
         if (err > 0) PANICF("%s: %s", arg, strerror(err));
 
-        TSTree *tree = ts_parser_parse_string(parser, 0, file.ptrc, file.len);
-        TSNode root = ts_tree_root_node(tree);
-        find_fundefs(root, file.ptr);
-
         stbds_arrput(stbds_arr_ccE_argv, arg);
         stbds_arrput(stbds_arr_files, file);
     }
+    stbds_arrput(stbds_arr_cc_argv, 0);
+    stbds_arrput(stbds_arr_ccE_argv, 0);
 
     stbds_arrput(stbds_arr_cc2_argv, cc);
     stbds_arrput(stbds_arr_cc2_argv, "-xc");
@@ -363,6 +374,7 @@ show_usage:
 
         stbds_arrput(stbds_arr_cc2_argv, arg);
     }
+    stbds_arrput(stbds_arr_cc2_argv, 0);
 
     fputs("comptime: ", stderr);
     for (int i = 0; i < stbds_arrlen(stbds_arr_ccE_argv); i++)
@@ -427,6 +439,10 @@ show_usage:
         }
     }
 
+    TSTree *tree = ts_parser_parse_string(parser, 0, (char *)expanded_blob, expanded_blob_len);
+    TSNode root = ts_tree_root_node(tree);
+    find_fundefs(root, expanded_blob);
+
     pid_t cc_pid;
     if (posix_spawnp(&cc_pid, stbds_arr_cc_argv[0], 0, 0, stbds_arr_cc_argv, envp) < 0)
         PANIC(strerror(errno));
@@ -481,7 +497,7 @@ show_usage:
             &cif, FFI_DEFAULT_ABI,
             stbds_arrlen(def->stbds_arr_arg_types),
             def->return_type,
-            &def->stbds_arr_arg_types
+            def->stbds_arr_arg_types
         );
         if (status != FFI_OK) PANIC("couldn't prepare comptime function call");
 
