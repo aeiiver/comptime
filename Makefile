@@ -13,14 +13,14 @@ SRCS := comptime.c $(LIBS)
 comptime: $(SRCS)
 	$(CC) -g3 -std=c99 -Wmissing-prototypes -fsanitize=undefined $(INCS) $(SRCS)
 
-test_selfhost:
-	./a.out -o comptime2 -g3 -std=c99 -Wmissing-prototypes $(INCS) comptime.c \
+test_selfhost: comptime
+	./a.out -- -o comptime2 -g3 -std=c99 -Wmissing-prototypes $(INCS) comptime.c \
 		external/tree-sitter-0.22.2/libtree-sitter.a \
 		external/tree-sitter-c-0.20.7/src/parser.o   \
 		external/libffi-3.4.6/build/usr/lib/libffi.so
 
 test_selfhost2: test_selfhost
-	./comptime2 -o comptime3 -g3 -std=c99 -Wmissing-prototypes $(INCS) comptime.c \
+	./comptime2 -- -o comptime3 -g3 -std=c99 -Wmissing-prototypes $(INCS) comptime.c \
 		external/tree-sitter-0.22.2/libtree-sitter.a \
 		external/tree-sitter-c-0.20.7/src/parser.o   \
 		external/libffi-3.4.6/build/usr/lib/libffi.so
