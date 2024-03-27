@@ -16,8 +16,6 @@
 
 extern TSLanguage *tree_sitter_c(void);
 
-// TODO: Handle variadic functions
-
 typedef struct {
     char      *name;
     ffi_type **stbds_arr_arg_types;
@@ -26,8 +24,9 @@ typedef struct {
 } fndef;
 
 typedef struct {
-    char  *name;
-    void **stbds_arr_arg_values;
+    char      *name;
+    void     **stbds_arr_arg_values;
+    ffi_type **stbds_arr_arg_types;
 } fncall;
 
 static fndef *stbds_arr_fndefs = 0;
@@ -197,6 +196,13 @@ recurse:
             sv quoted_string = node_text(arg, data);
             sv unquoted = (sv){quoted_string.ptr + 1, quoted_string.len - 2};
 
+            // TODO: Handle escape sequences. Right now it's just a plain copy
+            //       of the format string, so 'val' will contain literal
+            //       backslashes. It's not an issue if the final preprocessed
+            //       source code is passed to the compiler but for functions
+            //       that performs IO at compile-time, they may be unattended
+            //       results.
+
             val = malloc_or_oom(unquoted.len + 1);
             memcpy(val, unquoted.ptr, unquoted.len);
             val[unquoted.len] = 0;
@@ -205,6 +211,7 @@ recurse:
             *val_addr = val;
 
             stbds_arrput(call.stbds_arr_arg_values, val_addr);
+            stbds_arrput(call.stbds_arr_arg_types, &ffi_type_pointer);
         } else if (sz_eql(arg_type, "number_literal")) {
             sv unquoted = node_text(arg, data);
 
@@ -212,6 +219,27 @@ recurse:
             *val = atol((char *)unquoted.ptr);
 
             stbds_arrput(call.stbds_arr_arg_values, val);
+            stbds_arrput(call.stbds_arr_arg_types, &ffi_type_sint32);
+        } else if (sz_eql(arg_type, "identifier")) {
+            sv ident = node_text(arg, data);
+
+            void *val;
+            if (SV_EQL(ident, "stdin"))
+                val = stdin;
+            else if (SV_EQL(ident, "stdout"))
+                val = stdout;
+            else if (SV_EQL(ident, "stderr"))
+                val = stderr;
+            else {
+                fprintf(stderr, "won't resolve identifier: %.*s\n", ident.len, ident.ptr);
+                return false;
+            }
+
+            void **val_addr = malloc_or_oom(sizeof(*val));
+            *val_addr = val;
+
+            stbds_arrput(call.stbds_arr_arg_values, val_addr);
+            stbds_arrput(call.stbds_arr_arg_types, &ffi_type_pointer);
         } else {
             fprintf(stderr, "unsupported argument type: %s\n", arg_type);
             return false;
@@ -500,12 +528,31 @@ show_usage:
         if (fn == 0) PANIC(dlerror());
 
         ffi_cif cif = {0};
-        ffi_status status = ffi_prep_cif(
-            &cif, FFI_DEFAULT_ABI,
-            stbds_arrlen(def->stbds_arr_arg_types),
-            def->return_type,
-            def->stbds_arr_arg_types
-        );
+        ffi_status status;
+        if (def->is_variadic) {
+            ffi_type **stbds_arg_types = 0;
+
+            int i = 0;
+            for (; i < stbds_arrlen(def->stbds_arr_arg_types); i++)
+                stbds_arrput(stbds_arg_types, def->stbds_arr_arg_types[i]);
+            for (; i < stbds_arrlen(fncall.stbds_arr_arg_values); i++)
+                stbds_arrput(stbds_arg_types, fncall.stbds_arr_arg_types[i]);
+
+            status = ffi_prep_cif_var(
+                &cif, FFI_DEFAULT_ABI,
+                stbds_arrlen(def->stbds_arr_arg_types),
+                stbds_arrlen(fncall.stbds_arr_arg_values),
+                def->return_type,
+                stbds_arg_types
+            );
+        } else {
+            status = ffi_prep_cif(
+                &cif, FFI_DEFAULT_ABI,
+                stbds_arrlen(def->stbds_arr_arg_types),
+                def->return_type,
+                def->stbds_arr_arg_types
+            );
+        }
         if (status != FFI_OK) PANIC("couldn't prepare comptime function call");
 
         // NOTE: 'retval' is 64-bit long. We may want change that later.
@@ -541,6 +588,9 @@ show_usage:
         int start = ts_node_start_byte(callnode);
         int end = ts_node_end_byte(callnode);
         sb_splice(file, start, end, replace, replacelen);
+
+        // DEBUG
+        // fprintf(stderr, "===\n%.*s\n===\n", file->len, file->ptrc);
     }
 
     if (expand) {

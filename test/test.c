@@ -1,4 +1,3 @@
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -13,10 +12,10 @@ unsigned_add(unsigned int a, unsigned int b)
 int
 main(void)
 {
-    /* @comptime */ puts("AYAYA!");
+    /* @comptime */ fprintf(stderr, "AYAYA! %d\n", unsigned_add(45, unsigned_add(11, 13)));
 
-    assert(/* @comptime */ unsigned_add(45, unsigned_add(11, 13)) == 69);
-    puts(/* @comptime */ getenv("PWD"));
+    printf("Comptime PWD: %s\n", /* @comptime */ getenv("PWD"));
+    printf("Runtime PWD:  %s\n", getenv("PWD"));
 
     return 0;
 }
