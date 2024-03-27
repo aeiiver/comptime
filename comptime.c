@@ -267,9 +267,13 @@ main(int argc, char **argv, char **envp)
 
     char *program = SHIFT_ARGS(argc, argv);
     char **stbds_arr_funcs_to_run = 0;
+    bool expand = false;
 
-    // TODO: Clean up this mess. CLI is cool and all but the following
-    //       looks odd enough.
+    // TODO: Clean up this mess. CLI is cool and all but the following looks odd enough.
+    // TODO: Implement '--run' option.
+
+    if (argc == 0)
+        goto show_usage;
 
     while (argc > 0) {
         char *arg = SHIFT_ARGS(argc, argv);
@@ -278,8 +282,9 @@ show_usage:
             fprintf(stderr, "usage: %s [options] -- compiler_args\n", program);
             fprintf(stderr, "\n");
             fprintf(stderr, "options:\n");
-            fprintf(stderr, "    --run    Run function after preprocessing\n");
-            fprintf(stderr, "    --help   Show this usage message\n");
+            fprintf(stderr, "    --run     Run function after preprocessing\n");
+            fprintf(stderr, "    --expand  Output preprocessed files but don't compile\n");
+            fprintf(stderr, "    --help    Show this usage message\n");
             exit(-1);
         }
         char *option_name = arg + 2;
@@ -288,6 +293,8 @@ show_usage:
             break;
         } else if (sz_eql(option_name, "run")) {
             stbds_arrput(stbds_arr_funcs_to_run, SHIFT_ARGS(argc, argv));
+        } else if (sz_eql(option_name, "expand")) {
+            expand = true;
         } else if (sz_eql(option_name, "help")) {
             goto show_usage;
         } else {
@@ -536,40 +543,50 @@ show_usage:
         sb_splice(file, start, end, replace, replacelen);
     }
 
-    static int parent_to_child_fds[2] = {0};
-    if (pipe(parent_to_child_fds) < 0) PANIC(strerror(errno));
+    if (expand) {
+        if (stbds_arrlen(stbds_arr_funcs_to_run) > 0)
+            fprintf(stderr, "%s: ignoring option '--run' because '--expand' was provided", program);
 
-    switch (fork()) {
-    case -1:
-        PANIC(strerror(errno));
-
-    case 0: {
-        if (close(parent_to_child_fds[1]) < 0)
-            PANIC(strerror(errno));
-        if (dup2(parent_to_child_fds[0], STDIN_FILENO) < 0)
-            PANIC(strerror(errno));
-        execvp(stbds_arr_cc2_argv[0], stbds_arr_cc2_argv);
-        PANIC(strerror(errno));
-    } break;
-
-    default:
-        if (close(parent_to_child_fds[0]) < 0)
-            PANIC(strerror(errno));
         for (int i = 0; i < stbds_arrlen(stbds_arr_files); i++) {
             sb file = stbds_arr_files[i];
-            if (write(parent_to_child_fds[1], file.ptr, file.len) < 0)
-                PANIC(strerror(errno));
+            printf("%.*s\n", file.len, file.ptrc);
         }
-        if (close(parent_to_child_fds[1]) < 0)
+    } else {
+        static int parent_to_child_fds[2] = {0};
+        if (pipe(parent_to_child_fds) < 0) PANIC(strerror(errno));
+
+        switch (fork()) {
+        case -1:
             PANIC(strerror(errno));
 
-        int status;
-        if (wait(&status) < 0)
+        case 0: {
+            if (close(parent_to_child_fds[1]) < 0)
+                PANIC(strerror(errno));
+            if (dup2(parent_to_child_fds[0], STDIN_FILENO) < 0)
+                PANIC(strerror(errno));
+            execvp(stbds_arr_cc2_argv[0], stbds_arr_cc2_argv);
             PANIC(strerror(errno));
-        if (!WIFEXITED(status))
-            PANIC("cc subprocess exited abnormally");
-        if (WEXITSTATUS(status) != 0)
-            PANIC("cc subprocess exited with non-zero status code");
+        } break;
+
+        default:
+            if (close(parent_to_child_fds[0]) < 0)
+                PANIC(strerror(errno));
+            for (int i = 0; i < stbds_arrlen(stbds_arr_files); i++) {
+                sb file = stbds_arr_files[i];
+                if (write(parent_to_child_fds[1], file.ptr, file.len) < 0)
+                    PANIC(strerror(errno));
+            }
+            if (close(parent_to_child_fds[1]) < 0)
+                PANIC(strerror(errno));
+
+            int status;
+            if (wait(&status) < 0)
+                PANIC(strerror(errno));
+            if (!WIFEXITED(status))
+                PANIC("cc subprocess exited abnormally");
+            if (WEXITSTATUS(status) != 0)
+                PANIC("cc subprocess exited with non-zero status code");
+        }
     }
 
     // NOTE: Incoming dangerous operation. Surely a previous check would
