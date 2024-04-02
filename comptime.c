@@ -315,18 +315,16 @@ show_usage:
             fprintf(stderr, "    --help    Show this usage message\n");
             exit(-1);
         }
-        char *option_name = arg + 2;
-
-        if (*option_name == 0) {
+        /****/ if (sz_eql(arg, "--")) {
             break;
-        } else if (sz_eql(option_name, "run")) {
+        } else if (sz_eql(arg, "--run")) {
             stbds_arrput(stbds_arr_funcs_to_run, SHIFT_ARGS(argc, argv));
-        } else if (sz_eql(option_name, "expand")) {
+        } else if (sz_eql(arg, "--expand")) {
             expand = true;
-        } else if (sz_eql(option_name, "help")) {
+        } else if (sz_eql(arg, "--help")) {
             goto show_usage;
         } else {
-            fprintf(stderr, "%s: unknown option '%s'\n", program, option_name);
+            fprintf(stderr, "%s: unknown option '%s'\n", program, arg);
             exit(-1);
         }
     }
