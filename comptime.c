@@ -165,6 +165,7 @@ recurse:
         return false;
     }
 
+    fprintf(stderr, "NODE: ");
     print_node_text(node, data);
 
     TSNode fun_ident = TS_CHILD_NODE(node, "function");
@@ -255,22 +256,14 @@ recurse:
 static bool
 next_fncall(TSNode node, unsigned char *data, fncall *dst, TSNode *dstnode)
 {
-    TSNode comment_node;
-    bool found_comptime_comment = false;
 
     for (int i = 0; i < ts_node_child_count(node); i++) {
         TSNode child = ts_node_child(node, i);
         bool is_comment = sz_eql(ts_node_type(child), "comment");
         if (is_comment && SV_EQL(node_text(child, data), "/* @comptime */")) {
-            comment_node = child;
-            found_comptime_comment = true;
-            break;
+            if (next_fncall2(ts_node_next_sibling(child), data, dst, dstnode))
+                return true;
         }
-    }
-
-    if (found_comptime_comment) {
-        if (next_fncall2(ts_node_next_sibling(comment_node), data, dst, dstnode))
-            return true;
     }
 
     for (int i = 0; i < ts_node_child_count(node); i++)
@@ -546,7 +539,7 @@ show_usage:
         } else {
             status = ffi_prep_cif(
                 &cif, FFI_DEFAULT_ABI,
-                stbds_arrlen(def->stbds_arr_arg_types),
+                def->stbds_arr_arg_types[0] == &ffi_type_void ? 0 : stbds_arrlen(def->stbds_arr_arg_types),
                 def->return_type,
                 def->stbds_arr_arg_types
             );
