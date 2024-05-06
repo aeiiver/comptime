@@ -30,6 +30,7 @@ typedef struct {
 } fncall;
 
 static fndef *stbds_arr_fndefs = 0;
+static TSParser *parser = 0;
 
 static sv
 node_text(TSNode node, unsigned char *data)
@@ -272,10 +273,32 @@ next_fncall(TSNode node, unsigned char *data, fncall *dst, TSNode *dstnode)
     return false;
 }
 
+// static void
+// preprocess(TSNode node, sb *buffer)
+// {
+//     for (int i = 0; i < ts_node_child_count(node); i++) {
+//         TSNode child = ts_node_child(node, i);
+//         bool is_comment = sz_eql(ts_node_type(child), "comment");
+//         static char callexpr[256] = {0};
+//         int nscan = sscanf((char *)node_text(child, buffer->ptr).ptr, "/* @comptime:%s */", callexpr);
+//         if (is_comment && nscan > 0) {
+//             int start = ts_node_start_byte(child);
+//             int end = ts_node_end_byte(ts_node_next_sibling(child));
+//             static char replace[256] = {0};
+//             int replacelen = sprintf(replace, "/* @comptime.raw */ %s", callexpr);
+//             sb_splice(buffer, start, end, replace, replacelen);
+//             return;
+//         }
+//     }
+//
+//     for (int i = 0; i < ts_node_child_count(node); i++)
+//         preprocess(ts_node_child(node, i), buffer);
+// }
+
 int
 main(int argc, char **argv, char **envp)
 {
-    TSParser *parser = ts_parser_new();
+    parser = ts_parser_new();
     TSLanguage *c_language = tree_sitter_c();
     if (!ts_parser_set_language(parser, c_language)) {
         int min = TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION;
@@ -484,6 +507,13 @@ show_usage:
     void *dl = dlopen(so_fname, RTLD_LAZY);
     if (dl == 0) PANIC(dlerror());
 
+    // for (int i = 0; i < stbds_arrlen(stbds_arr_files); i++) {
+    //     sb *file = &stbds_arr_files[i];
+    //     TSTree *tree = ts_parser_parse_string(parser, 0, file->ptrc, file->len);
+    //     TSNode root = ts_tree_root_node(tree);
+    //     preprocess(root, file);
+    // }
+
     while (1) {
         sb *file;
         fncall fncall;
@@ -552,7 +582,7 @@ show_usage:
         ffi_call(&cif, fn, retval, fncall.stbds_arr_arg_values);
 
         // HACK: Static string, assuming the rendered string doesn't overflow.
-        static char replace[256];
+        static char replace[0x10000];
         int replacelen;
 
         ffi_type *ffi_rettype = def->return_type;
