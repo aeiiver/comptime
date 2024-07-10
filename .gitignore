@@ -1,1 +1,2 @@
-/target
+/external/libffi-3.4.6/build/
+/external/tree-sitter-c-0.20.7/src/parser.o
